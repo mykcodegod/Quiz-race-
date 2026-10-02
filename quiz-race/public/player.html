@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ዱነጊ-ጀማ</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="phone">
+  <div id="conn" class="banner conn" hidden>Connection lost. Reconnecting...</div>
+
+  <section id="join" hidden>
+    <img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="max-height: 100px; display: block; margin: 0 auto;">
+    <h1>ዱነጊ-ጀማ</h1>
+    <form id="joinForm" class="card">
+      <label>Your name
+        <input id="nameInput" type="text" maxlength="20" autocomplete="nickname" required>
+      </label>
+      <button class="btn primary big" type="submit">Join the race</button>
+      <p id="joinMsg" class="msg err" role="alert"></p>
+    </form>
+  </section>
+
+  <section id="rejected" class="card" hidden>
+    <h2>Can't join yet</h2>
+    <p id="rejMsg"></p>
+    <button id="retryBtn" class="btn" type="button">Try again</button>
+  </section>
+
+  <section id="wait" class="stack" hidden>
+    <h1 id="waitTitle">You're in</h1>
+    <div class="card">
+      <h2>Waiting for the host to start</h2>
+      <p class="muted">Players so far: <strong id="waitCount">0</strong></p>
+      <ul id="waitList" class="chips"></ul>
+    </div>
+  </section>
+
+  <section id="play" class="stack" hidden>
+    <div class="card">
+      <div class="q-meta"><span id="qNum"></span><span id="answeredInfo" class="muted"></span></div>
+      <div class="timer-row">
+        <div class="timer"><i id="timerFill"></i></div>
+        <span id="timerNum" class="timer-num"></span>
+      </div>
+      <div id="paused" class="banner" hidden>Paused by the host</div>
+      <h2 id="qText" class="q-text"></h2>
+      <div id="opts" class="opts"></div>
+      <p id="result" class="result" aria-live="polite"></p>
+    </div>
+    <div class="card">
+      <h2>Scoreboard</h2>
+      <ol id="playBoard" class="board"></ol>
+    </div>
+  </section>
+
+  <section id="end" class="stack" hidden>
+    <div class="card">
+      <p class="muted">Final result</p>
+      <p id="endRank" class="winner"></p>
+      <p id="endHint" class="muted small">Waiting for the host to start a new round.</p>
+    </div>
+    <div class="card">
+      <h2>Final scoreboard</h2>
+      <ol id="endBoard" class="board"></ol>
+    </div>
+  </section>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/common.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const socket = io();
+  const clock = RaceClock($('timerFill'), $('timerNum'));
+
+  const KEY_ID = 'dunegijema_id';
+  const KEY_NAME = 'dunegijema_name';
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+  };
+
+  let joined = false;
+  let rejectedMsg = null;
+  let state = null;
+  let builtQ = -1;
+  let localChoice = null;
+
+  const SECTIONS = ['join', 'rejected', 'wait', 'play', 'end'];
+  function show(name) {
+    SECTIONS.forEach((s) => { $(s).hidden = s !== name; });
+    if (name !== 'play') clock.stop();
+  }
+
+  function tryJoin(name) {
+    socket.emit('player:join', { playerId: store.get(KEY_ID), name });
+  }
+
+  /* ---------- socket events ---------- */
+  socket.on('connect', () => {
+    $('conn').hidden = true;
+    const name = store.get(KEY_NAME);
+    if (name) tryJoin(name);
+    else render();
+  });
+  socket.on('disconnect', () => { $('conn').hidden = false; });
+
+  socket.on('joined', (d) => {
+    joined = true;
+    rejectedMsg = null;
+    store.set(KEY_ID, d.id);
+    store.set(KEY_NAME, d.name);
+    $('waitTitle').textContent = "You're in, " + d.name;
+    render();
+  });
+
+  socket.on('join:error', (d) => {
+    joined = false;
+    $('joinMsg').textContent = d.message;
+    $('nameInput').value = store.get(KEY_NAME) || $('nameInput').value;
+    render();
+  });
+
+  socket.on('join:rejected', (d) => {
+    joined = false;
+    rejectedMsg = d.message;
+    render();
+  });
+
+  socket.on('state', (s) => {
+    state = s;
+    render();
+  });
+
+  /* ---------- UI events ---------- */
+  $('joinForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    $('joinMsg').textContent = '';
+    const name = $('nameInput').value.trim();
+    if (!name) { $('joinMsg').textContent = 'Enter a name to join.'; return; }
+    store.set(KEY_NAME, name);
+    tryJoin(name);
+  });
+
+  $('retryBtn').addEventListener('click', () => {
+    const name = store.get(KEY_NAME);
+    if (name) tryJoin(name);
+    else { rejectedMsg = null; render(); }
+  });
+
+  /* ---------- rendering ---------- */
+  function render() {
+    const s = state;
+
+    if (!joined) {
+      const lateNewcomer = s && s.status !== 'LOBBY' && !store.get(KEY_ID);
+      if (rejectedMsg || lateNewcomer) {
+        $('rejMsg').textContent = rejectedMsg || 'Session already started. Join the next round!';
+        show('rejected');
+      } else {
+        show('join');
+      }
+      return;
+    }
+    if (!s) return;
+
+    if (s.status === 'LOBBY') return renderWait(s);
+    if (s.status === 'FINISHED') return renderEnd(s);
+    renderPlay(s);
+  }
+
+  function renderWait(s) {
+    show('wait');
+    $('waitCount').textContent = s.playerCount;
+    const ul = $('waitList');
+    ul.replaceChildren();
+    s.board.forEach((b) => ul.append(makeEl('li', '', b.name)));
+  }
+
+  function renderEnd(s) {
+    show('end');
+    const mine = s.me && s.board.find((b) => b.pid === s.me.pid);
+    $('endRank').textContent = mine
+      ? 'You finished #' + mine.rank + ' with ' + mine.score.toLocaleString() + ' points'
+      : 'Game over';
+    renderBoard($('endBoard'), s.board, s.me ? s.me.pid : null);
+    builtQ = -1;
+    localChoice = null;
+  }
+
+  function buildOptions(s) {
+    const box = $('opts');
+    box.replaceChildren();
+    s.question.options.forEach((text, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'opt';
+      b.append(makeEl('span', 'bubble', 'ABCDEF'[i]), makeEl('span', 'opt-text', text));
+      b.addEventListener('click', () => {
+        if (b.disabled) return;
+        localChoice = i;          // show the tap immediately
+        updateOptions(state);
+        socket.emit('player:answer', { choice: i });
+      });
+      box.append(b);
+    });
+    builtQ = s.qNumber;
+    localChoice = null;
+  }
+
+  function updateOptions(s) {
+    const reveal = s.phase === 'reveal';
+    const serverChoice = s.me && s.me.choice !== null ? s.me.choice : null;
+    const choice = serverChoice !== null ? serverChoice : (reveal ? null : localChoice);
+    const locked = reveal || s.status === 'PAUSED' || choice !== null;
+
+    [...$('opts').children].forEach((b, i) => {
+      b.disabled = locked;
+      b.className = 'opt';
+      if (reveal) {
+        if (i === s.correctIndex) b.classList.add('right');
+        else if (i === choice) b.classList.add('wrong');
+      } else if (i === choice) {
+        b.classList.add('picked');
+      }
+    });
+    return choice;
+  }
+
+  function renderPlay(s) {
+    show('play');
+    const reveal = s.phase === 'reveal';
+    $('qNum').textContent = 'Question ' + s.qNumber + ' of ' + s.qTotal;
+    $('qText').textContent = s.question.text;
+    if (builtQ !== s.qNumber) buildOptions(s);
+    const choice = updateOptions(s);
+
+    clock.set(s.remainingMs, s.phaseMs, s.status === 'PAUSED', !reveal);
+    $('paused').hidden = s.status !== 'PAUSED';
+
+    const active = s.board.filter((b) => b.connected).length;
+    const answered = s.board.filter((b) => b.connected && b.answered).length;
+    $('answeredInfo').textContent = reveal ? '' : answered + ' of ' + active + ' answered';
+
+    const result = $('result');
+    result.className = 'result';
+    if (reveal) {
+      if (s.me && s.me.choice === null) {
+        result.textContent = "Time's up. No answer from you.";
+        result.classList.add('bad');
+      } else if (s.me && s.me.choice === s.correctIndex) {
+        result.textContent = 'Correct! +' + s.me.gain + ' points';
+        result.classList.add('good');
+      } else {
+        result.textContent = 'Not this time.';
+        result.classList.add('bad');
+      }
+    } else if (choice !== null) {
+      result.textContent = 'Answer locked in. Waiting for the others.';
+    } else {
+      result.textContent = s.status === 'PAUSED' ? '' : 'Tap your answer.';
+    }
+
+    renderBoard($('playBoard'), s.board, s.me ? s.me.pid : null);
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

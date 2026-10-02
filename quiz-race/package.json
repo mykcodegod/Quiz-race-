@@ -1,0 +1,20 @@
+{
+  "name": "quiz-race",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer ዱነጊ-ጀማ hosted on a local PC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20.16"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "mammoth": "^1.8.0",
+    "multer": "^2.0.0",
+    "pdf-parse": "^2.4.5",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.0"
+  }
+}

@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Host - ዱነጊ-ጀማ</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <h1><img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">ዱነጊ-ጀማ</h1>
+  <span id="statusPill" class="pill">Lobby</span>
+</header>
+
+<main>
+  <section id="denied" class="card" hidden>
+    <h2>Open this page on the PC running the server</h2>
+    <p>Go to <strong>http://localhost:3000/host</strong> on that PC.</p>
+  </section>
+
+  <!-- LOBBY -->
+  <section id="lobby" class="grid2">
+    <div class="stack">
+      <div class="card join-card">
+        <h2>Players scan this to join</h2>
+        <img id="qr" alt="QR code with the join address" width="340" height="340">
+        <p id="joinUrl" class="url"></p>
+        <label id="netRow" hidden>Network
+          <select id="netSel"></select>
+        </label>
+        <p class="muted small">Players must be on the same Wi-Fi as this PC.</p>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="card">
+        <h2>Questions</h2>
+        <label class="drop" id="drop">
+          <input type="file" id="file" accept=".pdf,.docx,.txt" hidden>
+          <strong>Choose a file</strong> or drop it here<br>
+          <span class="muted small">PDF, Word (.docx) or text file</span>
+        </label>
+        <p id="deckMsg" class="msg" aria-live="polite"></p>
+        <ul id="warnings" class="warn"></ul>
+        <details id="preview" hidden>
+          <summary>Check the parsed questions</summary>
+          <ol id="previewList" class="preview-list"></ol>
+        </details>
+        <details>
+          <summary>Question format</summary>
+<pre>Q1: What is the primary function of mitochondria?
+A) Protein synthesis
+B) Cellular respiration and ATP production
+C) DNA replication
+D) Lipid storage
+Answer: B
+
+Q2: Which data structure operates on a LIFO basis?
+A) Queue
+B) Array
+C) Stack
+D) Tree
+Answer: C</pre>
+          <p class="muted small" style="margin-top:8px">Type the letters yourself (A), B)...). Word's automatic list lettering is not read. 2 to 6 options per question.</p>
+        </details>
+      </div>
+
+      <div class="card">
+        <h2>Players <span id="pcount" class="count">0</span></h2>
+        <ul id="lobbyPlayers" class="chips"></ul>
+        <p id="noPlayers" class="muted">Nobody yet. Scan the code to join.</p>
+      </div>
+
+      <div class="card">
+        <label>Seconds per question
+          <input type="number" id="secs" min="5" max="60" value="15">
+        </label>
+        <label class="check"><input type="checkbox" id="bonus" checked> Faster correct answers earn more points</label>
+        <button id="startBtn" class="btn primary big" type="button" disabled>Start game</button>
+        <p id="startHint" class="muted small"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- GAME -->
+  <section id="game" class="grid-game" hidden>
+    <div class="stack">
+      <div class="card">
+        <div class="q-meta"><span id="qNum"></span><span id="answeredInfo" class="muted"></span></div>
+        <div class="timer-row">
+          <div class="timer"><i id="timerFill"></i></div>
+          <span id="timerNum" class="timer-num"></span>
+        </div>
+        <div id="paused" class="banner" hidden>Game paused. Player screens are frozen.</div>
+        <h2 id="qText" class="q-text"></h2>
+        <div id="opts" class="opts"></div>
+      </div>
+      <div class="controls">
+        <button id="pauseBtn" class="btn" type="button">Pause</button>
+        <button id="endBtn" class="btn danger" type="button">End game</button>
+      </div>
+    </div>
+    <aside class="card">
+      <h2>Scoreboard</h2>
+      <ol id="gameBoard" class="board"></ol>
+    </aside>
+  </section>
+
+  <!-- FINISHED -->
+  <section id="final" class="stack" hidden>
+    <div class="card">
+      <p class="muted">Winner</p>
+      <p id="winner" class="winner"></p>
+    </div>
+    <div class="card">
+      <h2>Final scoreboard</h2>
+      <ol id="finalBoard" class="board"></ol>
+    </div>
+    <div class="controls">
+      <button id="newBtn" class="btn primary" type="button">New round with the same questions</button>
+    </div>
+  </section>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/common.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const socket = io();
+  const clock = RaceClock($('timerFill'), $('timerNum'));
+
+  let info = null;
+  let deck = null;
+  let state = null;
+  let builtQ = -1;
+
+  const VIEWS = ['denied', 'lobby', 'game', 'final'];
+  function show(name) {
+    VIEWS.forEach((v) => { $(v).hidden = v !== name; });
+    if (name !== 'game') clock.stop();
+  }
+
+  /* ---------- socket ---------- */
+  socket.on('connect', () => socket.emit('host:join'));
+  socket.on('host:denied', () => show('denied'));
+  socket.on('host:info', (i) => { info = i; renderJoin(); });
+  socket.on('deck', (d) => { deck = d; renderDeck(); renderLobby(); });
+  socket.on('state', (s) => { state = s; render(); });
+
+  /* ---------- join card (QR) ---------- */
+  function renderJoin() {
+    if (!info || !info.candidates.length) return;
+    const sel = $('netSel');
+    const keep = sel.value;
+    sel.replaceChildren();
+    info.candidates.forEach((c, i) => {
+      const o = document.createElement('option');
+      o.value = i;
+      o.textContent = c.name + ' (' + c.ip + ')';
+      sel.append(o);
+    });
+    if (keep && keep < info.candidates.length) sel.value = keep;
+    $('netRow').hidden = info.candidates.length < 2;
+    showCandidate(Number(sel.value) || 0);
+  }
+  function showCandidate(i) {
+    const c = info.candidates[i];
+    $('qr').src = c.qr;
+    $('joinUrl').textContent = c.url;
+  }
+  $('netSel').addEventListener('change', (e) => showCandidate(Number(e.target.value)));
+
+  /* ---------- upload ---------- */
+  async function upload(file) {
+    const msg = $('deckMsg');
+    msg.className = 'msg';
+    msg.textContent = 'Reading ' + file.name + '...';
+    $('warnings').replaceChildren();
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!data.ok) {
+        msg.className = 'msg err';
+        msg.textContent = data.error || 'Upload failed.';
+        (data.warnings || []).forEach((w) => $('warnings').append(makeEl('li', '', w)));
+      }
+      // On success the server pushes a "deck" event, which redraws this card.
+    } catch (e) {
+      msg.className = 'msg err';
+      msg.textContent = 'Upload failed. Is the server still running?';
+    }
+  }
+  $('file').addEventListener('change', (e) => {
+    if (e.target.files[0]) upload(e.target.files[0]);
+    e.target.value = '';
+  });
+  const drop = $('drop');
+  ['dragenter', 'dragover'].forEach((ev) =>
+    drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((ev) =>
+    drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f) upload(f);
+  });
+
+  function renderDeck() {
+    const msg = $('deckMsg');
+    const list = $('previewList');
+    list.replaceChildren();
+    $('warnings').replaceChildren();
+    if (!deck) {
+      $('preview').hidden = true;
+      return;
+    }
+    msg.className = 'msg ok';
+    msg.textContent = deck.count + ' question' + (deck.count === 1 ? '' : 's') + ' ready from ' + deck.fileName;
+    deck.warnings.forEach((w) => $('warnings').append(makeEl('li', '', w)));
+    deck.questions.forEach((q) => {
+      const li = document.createElement('li');
+      li.append(makeEl('div', '', q.text));
+      li.append(makeEl('div', 'ok-opt', 'Answer: ' + 'ABCDEF'[q.correctIndex] + ') ' + q.options[q.correctIndex]));
+      list.append(li);
+    });
+    $('preview').hidden = false;
+  }
+
+  /* ---------- controls ---------- */
+  $('startBtn').addEventListener('click', () => {
+    socket.emit('host:start', {
+      timeLimitSec: Number($('secs').value),
+      speedBonus: $('bonus').checked,
+    });
+  });
+  $('pauseBtn').addEventListener('click', () => {
+    socket.emit(state && state.status === 'PAUSED' ? 'host:resume' : 'host:pause');
+  });
+  $('endBtn').addEventListener('click', () => {
+    if (confirm('End the game and return to the lobby? Scores will be cleared.')) socket.emit('host:reset');
+  });
+  $('newBtn').addEventListener('click', () => socket.emit('host:reset'));
+
+  /* ---------- rendering ---------- */
+  const PILL = { LOBBY: 'Lobby', IN_PROGRESS: 'In progress', PAUSED: 'Paused', FINISHED: 'Finished' };
+
+  function render() {
+    if (!state) return;
+    $('statusPill').textContent = PILL[state.status] || '';
+    if (state.status === 'LOBBY') { renderLobby(); show('lobby'); }
+    else if (state.status === 'FINISHED') { renderFinal(); show('final'); }
+    else { renderGame(); show('game'); }
+  }
+
+  function renderLobby() {
+    if (!state) return;
+    const n = state.board.length;
+    $('pcount').textContent = n;
+    $('noPlayers').hidden = n > 0;
+    const ul = $('lobbyPlayers');
+    ul.replaceChildren();
+    state.board.forEach((b) => ul.append(makeEl('li', '', b.name)));
+
+    const ready = !!deck && n > 0;
+    $('startBtn').disabled = !ready;
+    $('startHint').textContent = ready ? '' :
+      (!deck ? 'Upload a question file to continue.' : 'Waiting for at least one player to join.');
+    // reset game-view caches for the next round
+    builtQ = -1;
+  }
+
+  function buildOptions(s) {
+    const box = $('opts');
+    box.replaceChildren();
+    s.question.options.forEach((t, i) => {
+      const d = document.createElement('div');
+      d.className = 'opt';
+      d.append(makeEl('span', 'bubble', 'ABCDEF'[i]), makeEl('span', 'opt-text', t), makeEl('span', 'tally', ''));
+      box.append(d);
+    });
+    builtQ = s.qNumber;
+  }
+
+  function renderGame() {
+    const s = state;
+    const reveal = s.phase === 'reveal';
+    $('qNum').textContent = 'Question ' + s.qNumber + ' of ' + s.qTotal;
+    $('qText').textContent = s.question.text;
+    if (builtQ !== s.qNumber) buildOptions(s);
+
+    [...$('opts').children].forEach((d, i) => {
+      d.className = 'opt' + (reveal && i === s.correctIndex ? ' right' : '');
+      d.querySelector('.tally').textContent = reveal && s.counts ? s.counts[i] + (s.counts[i] === 1 ? ' pick' : ' picks') : '';
+    });
+
+    const active = s.board.filter((b) => b.connected).length;
+    const answered = s.board.filter((b) => b.connected && b.answered).length;
+    $('answeredInfo').textContent = reveal ? 'Next question is coming up' : answered + ' of ' + active + ' answered';
+
+    clock.set(s.remainingMs, s.phaseMs, s.status === 'PAUSED', !reveal);
+    $('paused').hidden = s.status !== 'PAUSED';
+    $('pauseBtn').textContent = s.status === 'PAUSED' ? 'Resume' : 'Pause';
+
+    renderBoard($('gameBoard'), s.board, null);
+  }
+
+  function renderFinal() {
+    const top = state.board.filter((b) => b.rank === 1);
+    $('winner').textContent = top.length
+      ? top.map((b) => b.name).join(' and ') + ' - ' + top[0].score.toLocaleString() + ' points'
+      : 'No players';
+    renderBoard($('finalBoard'), state.board, null);
+    builtQ = -1;
+  }
+})();
+</script>
+</body>
+</html>
