@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="top">
-  <h1><img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">ዱነጊ-ጀማ</h1>
+  <h1 style="display: flex; align-items: center;"><img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="height: 80px; margin-right: 12px;">ዱነጊ-ጀማ</h1>
   <span id="statusPill" class="pill">Lobby</span>
 </header>
 
@@ -42,7 +42,8 @@
         </label>
         <p id="deckMsg" class="msg" aria-live="polite"></p>
         <ul id="warnings" class="warn"></ul>
-        <details id="preview" hidden>
+        <div id="decksContainer" style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;"></div>
+        <details id="preview" hidden style="margin-top: 12px;">
           <summary>Check the parsed questions</summary>
           <ol id="previewList" class="preview-list"></ol>
         </details>
@@ -54,6 +55,7 @@ B) Cellular respiration and ATP production
 C) DNA replication
 D) Lipid storage
 Answer: B
+Description: Mitochondria are membrane-bound cell organelles that generate most of the chemical energy needed to power the cell's biochemical reactions.
 
 Q2: Which data structure operates on a LIFO basis?
 A) Queue
@@ -72,11 +74,20 @@ Answer: C</pre>
       </div>
 
       <div class="card">
-        <label>Seconds per question
-          <input type="number" id="secs" min="5" max="60" value="15">
+        <label>Seconds per question (0 for no timer)
+          <input type="number" id="secs" min="0" max="60" value="15">
         </label>
-        <label class="check"><input type="checkbox" id="bonus" checked> Faster correct answers earn more points</label>
-        <button id="startBtn" class="btn primary big" type="button" disabled>Start game</button>
+        <label class="check" style="margin-top: 10px;"><input type="checkbox" id="autoMode" checked> Automatic Mode (Auto reveal & next)</label>
+        <label class="check" style="margin-top: 10px;"><input type="checkbox" id="bonus" checked> Faster correct answers earn more points</label>
+        
+        <label class="check" style="margin-top: 10px;"><input type="checkbox" id="lastManPressure"> Enable Last Man Pressure (80% answered)</label>
+        <label id="pressureTimeLabel" style="display: none; margin-left: 28px; margin-top: 6px;">Pressure time (secs)
+          <input type="number" id="pressureSecs" min="1" max="60" value="10">
+        </label>
+        
+        <label class="check" style="margin-top: 10px;"><input type="checkbox" id="submitMode"> Submit Mode (Players must click Submit)</label>
+        
+        <button id="startBtn" class="btn primary big" type="button" style="margin-top: 16px;" disabled>Start game</button>
         <p id="startHint" class="muted small"></p>
       </div>
     </div>
@@ -94,8 +105,10 @@ Answer: C</pre>
         <div id="paused" class="banner" hidden>Game paused. Player screens are frozen.</div>
         <h2 id="qText" class="q-text"></h2>
         <div id="opts" class="opts"></div>
+        <button id="descBtn" class="btn" type="button" style="margin-top: 16px; width: 100%;" hidden>View Description</button>
       </div>
       <div class="controls">
+        <button id="nextPhaseBtn" class="btn primary" type="button" hidden>Reveal Answer</button>
         <button id="pauseBtn" class="btn" type="button">Pause</button>
         <button id="endBtn" class="btn danger" type="button">End game</button>
       </div>
@@ -122,6 +135,14 @@ Answer: C</pre>
   </section>
 </main>
 
+<div id="descModal" class="modal" hidden>
+  <div class="card modal-content">
+    <h2>Description</h2>
+    <p id="descText" style="margin: 16px 0; white-space: pre-wrap; font-size: 1.1rem; line-height: 1.5;"></p>
+    <button id="closeDescBtn" class="btn primary big" type="button">Close</button>
+  </div>
+</div>
+
 <script src="/socket.io/socket.io.js"></script>
 <script src="/common.js"></script>
 <script>
@@ -132,7 +153,7 @@ Answer: C</pre>
   const clock = RaceClock($('timerFill'), $('timerNum'));
 
   let info = null;
-  let deck = null;
+  let decksData = null; // { decks: [], activeDeckId: null }
   let state = null;
   let builtQ = -1;
 
@@ -146,7 +167,7 @@ Answer: C</pre>
   socket.on('connect', () => socket.emit('host:join'));
   socket.on('host:denied', () => show('denied'));
   socket.on('host:info', (i) => { info = i; renderJoin(); });
-  socket.on('deck', (d) => { deck = d; renderDeck(); renderLobby(); });
+  socket.on('decks', (d) => { decksData = d; renderDeck(); renderLobby(); });
   socket.on('state', (s) => { state = s; render(); });
 
   /* ---------- join card (QR) ---------- */
@@ -211,16 +232,59 @@ Answer: C</pre>
   function renderDeck() {
     const msg = $('deckMsg');
     const list = $('previewList');
+    const container = $('decksContainer');
     list.replaceChildren();
     $('warnings').replaceChildren();
-    if (!deck) {
+    container.replaceChildren();
+    
+    if (!decksData || !decksData.decks || decksData.decks.length === 0) {
       $('preview').hidden = true;
       return;
     }
+    
+    // Render available decks
+    decksData.decks.forEach(d => {
+      const isSelected = d.id === decksData.activeDeckId;
+      const b = document.createElement('button');
+      b.className = 'btn' + (isSelected ? ' primary' : '');
+      b.style.textAlign = 'left';
+      b.style.display = 'flex';
+      b.style.flexDirection = 'column';
+      b.style.padding = '8px 12px';
+      
+      const title = document.createElement('strong');
+      title.textContent = d.title || d.fileName;
+      
+      const sub = document.createElement('span');
+      sub.className = 'small' + (isSelected ? '' : ' muted');
+      
+      let statusText = `${d.count} Qs`;
+      if (d.playedCount > 0 && d.playedCount < d.count) {
+        statusText += ` — ${d.playedCount}/${d.count} played`;
+      } else if (d.playedCount >= d.count) {
+        statusText += ` — Completed`;
+      }
+      
+      sub.textContent = `By ${d.uploader} • ${statusText}`;
+      
+      b.append(title, sub);
+      b.addEventListener('click', () => {
+        socket.emit('host:select_deck', d.id);
+      });
+      container.append(b);
+    });
+
+    const activeDeck = decksData.decks.find(d => d.id === decksData.activeDeckId);
+    if (!activeDeck) {
+      $('preview').hidden = true;
+      msg.textContent = '';
+      return;
+    }
+
     msg.className = 'msg ok';
-    msg.textContent = deck.count + ' question' + (deck.count === 1 ? '' : 's') + ' ready from ' + deck.fileName;
-    deck.warnings.forEach((w) => $('warnings').append(makeEl('li', '', w)));
-    deck.questions.forEach((q) => {
+    msg.textContent = activeDeck.count + ' question' + (activeDeck.count === 1 ? '' : 's') + ' ready';
+    activeDeck.warnings.forEach((w) => $('warnings').append(makeEl('li', '', w)));
+    activeDeck.questions.forEach((q) => {
       const li = document.createElement('li');
       li.append(makeEl('div', '', q.text));
       li.append(makeEl('div', 'ok-opt', 'Answer: ' + 'ABCDEF'[q.correctIndex] + ') ' + q.options[q.correctIndex]));
@@ -230,19 +294,33 @@ Answer: C</pre>
   }
 
   /* ---------- controls ---------- */
+  $('lastManPressure').addEventListener('change', (e) => {
+    $('pressureTimeLabel').style.display = e.target.checked ? 'block' : 'none';
+  });
+
   $('startBtn').addEventListener('click', () => {
     socket.emit('host:start', {
       timeLimitSec: Number($('secs').value),
       speedBonus: $('bonus').checked,
+      autoMode: $('autoMode').checked,
+      lastManPressure: $('lastManPressure').checked,
+      pressureTimeSec: Number($('pressureSecs').value),
+      submitMode: $('submitMode').checked
     });
   });
   $('pauseBtn').addEventListener('click', () => {
     socket.emit(state && state.status === 'PAUSED' ? 'host:resume' : 'host:pause');
   });
+  $('nextPhaseBtn').addEventListener('click', () => {
+    socket.emit('host:next_phase');
+  });
   $('endBtn').addEventListener('click', () => {
     if (confirm('End the game and return to the lobby? Scores will be cleared.')) socket.emit('host:reset');
   });
   $('newBtn').addEventListener('click', () => socket.emit('host:reset'));
+  
+  $('descBtn').addEventListener('click', () => socket.emit('desc:toggle', true));
+  $('closeDescBtn').addEventListener('click', () => socket.emit('desc:toggle', false));
 
   /* ---------- rendering ---------- */
   const PILL = { LOBBY: 'Lobby', IN_PROGRESS: 'In progress', PAUSED: 'Paused', FINISHED: 'Finished' };
@@ -264,10 +342,10 @@ Answer: C</pre>
     ul.replaceChildren();
     state.board.forEach((b) => ul.append(makeEl('li', '', b.name)));
 
-    const ready = !!deck && n > 0;
+    const ready = !!decksData && !!decksData.activeDeckId && n > 0;
     $('startBtn').disabled = !ready;
     $('startHint').textContent = ready ? '' :
-      (!deck ? 'Upload a question file to continue.' : 'Waiting for at least one player to join.');
+      (!decksData || !decksData.activeDeckId ? 'Upload or select a question file to continue.' : 'Waiting for at least one player to join.');
     // reset game-view caches for the next round
     builtQ = -1;
   }
@@ -278,7 +356,17 @@ Answer: C</pre>
     s.question.options.forEach((t, i) => {
       const d = document.createElement('div');
       d.className = 'opt';
-      d.append(makeEl('span', 'bubble', 'ABCDEF'[i]), makeEl('span', 'opt-text', t), makeEl('span', 'tally', ''));
+      
+      const label = makeEl('span', 'opt-text', t);
+      const namesDiv = makeEl('div', 'opt-names', '');
+      namesDiv.style.fontSize = '0.8rem';
+      namesDiv.style.opacity = '0.8';
+      namesDiv.style.marginTop = '4px';
+      namesDiv.id = `hostOptNames-${i}`;
+      
+      const tally = makeEl('span', 'tally', '');
+      
+      d.append(makeEl('span', 'bubble', 'ABCDEF'[i]), label, namesDiv, tally);
       box.append(d);
     });
     builtQ = s.qNumber;
@@ -294,6 +382,15 @@ Answer: C</pre>
     [...$('opts').children].forEach((d, i) => {
       d.className = 'opt' + (reveal && i === s.correctIndex ? ' right' : '');
       d.querySelector('.tally').textContent = reveal && s.counts ? s.counts[i] + (s.counts[i] === 1 ? ' pick' : ' picks') : '';
+      
+      const nd = d.querySelector(`#hostOptNames-${i}`);
+      if (nd) {
+        if (reveal && s.revealedChoices) {
+          nd.textContent = s.revealedChoices[i].length > 0 ? s.revealedChoices[i].join(', ') : '';
+        } else {
+          nd.textContent = '';
+        }
+      }
     });
 
     const active = s.board.filter((b) => b.connected).length;
@@ -302,7 +399,27 @@ Answer: C</pre>
 
     clock.set(s.remainingMs, s.phaseMs, s.status === 'PAUSED', !reveal);
     $('paused').hidden = s.status !== 'PAUSED';
-    $('pauseBtn').textContent = s.status === 'PAUSED' ? 'Resume' : 'Pause';
+    $('pauseBtn').textContent = s.status === 'PAUSED' && !s.pausedForDesc ? 'Resume' : 'Pause';
+
+    if (s.settings && !s.settings.autoMode) {
+      $('nextPhaseBtn').hidden = false;
+      $('nextPhaseBtn').textContent = reveal ? 'Next Question' : 'Reveal Answer';
+    } else {
+      $('nextPhaseBtn').hidden = true;
+    }
+
+    if (reveal && s.question.description) {
+      $('descBtn').hidden = false;
+    } else {
+      $('descBtn').hidden = true;
+    }
+
+    if (s.descOpen && s.question.description) {
+      $('descText').textContent = s.question.description;
+      $('descModal').hidden = false;
+    } else {
+      $('descModal').hidden = true;
+    }
 
     renderBoard($('gameBoard'), s.board, null);
   }

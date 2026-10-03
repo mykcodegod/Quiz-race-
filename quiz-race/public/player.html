@@ -7,12 +7,13 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<header class="top">
+  <h1 style="display: flex; align-items: center;"><img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="height: 80px; margin-right: 12px;">ዱነጊ-ጀማ</h1>
+</header>
 <main class="phone">
   <div id="conn" class="banner conn" hidden>Connection lost. Reconnecting...</div>
 
   <section id="join" hidden>
-    <img src="/logo.png" alt="ዱነጊ-ጀማ Logo" style="max-height: 100px; display: block; margin: 0 auto;">
-    <h1>ዱነጊ-ጀማ</h1>
     <form id="joinForm" class="card">
       <label>Your name
         <input id="nameInput" type="text" maxlength="20" autocomplete="nickname" required>
@@ -35,6 +36,11 @@
       <p class="muted">Players so far: <strong id="waitCount">0</strong></p>
       <ul id="waitList" class="chips"></ul>
     </div>
+    <div class="card">
+      <h2>Submit a Question</h2>
+      <p class="muted small">Add your own question to the game!</p>
+      <button id="openSubmitBtn" class="btn primary" style="margin-top: 10px; width: 100%;" type="button">Submit Question</button>
+    </div>
   </section>
 
   <section id="play" class="stack" hidden>
@@ -47,7 +53,9 @@
       <div id="paused" class="banner" hidden>Paused by the host</div>
       <h2 id="qText" class="q-text"></h2>
       <div id="opts" class="opts"></div>
+      <button id="submitAnswerBtn" class="btn primary big" type="button" style="margin-top: 16px; width: 100%;" hidden>Submit Answer</button>
       <p id="result" class="result" aria-live="polite"></p>
+      <button id="descBtn" class="btn" type="button" style="margin-top: 16px; width: 100%;" hidden>View Description</button>
     </div>
     <div class="card">
       <h2>Scoreboard</h2>
@@ -67,6 +75,30 @@
     </div>
   </section>
 </main>
+
+<div id="descModal" class="modal" hidden>
+  <div class="card modal-content">
+    <h2>Description</h2>
+    <p id="descText" style="margin: 16px 0; white-space: pre-wrap; font-size: 1.1rem; line-height: 1.5;"></p>
+    <button id="closeDescBtn" class="btn primary big" type="button">Close</button>
+  </div>
+</div>
+
+<div id="submitModal" class="modal" hidden>
+  <form id="submitForm" class="card modal-content">
+    <h2>Submit a Question File</h2>
+    <label>Title
+      <input type="text" id="subTitle" required>
+    </label>
+    <label>File (TXT, PDF, DOCX)
+      <input type="file" id="subFile" accept=".txt,.pdf,.docx" required>
+    </label>
+    <div class="controls" style="margin-top: 16px;">
+      <button type="submit" id="subSubmitBtn" class="btn primary">Upload</button>
+      <button type="button" id="closeSubmitBtn" class="btn">Cancel</button>
+    </div>
+  </form>
+</div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="/common.js"></script>
@@ -152,6 +184,34 @@
     else { rejectedMsg = null; render(); }
   });
 
+  $('descBtn').addEventListener('click', () => socket.emit('desc:toggle', true));
+  $('closeDescBtn').addEventListener('click', () => socket.emit('desc:toggle', false));
+
+  $('openSubmitBtn').addEventListener('click', () => $('submitModal').hidden = false);
+  $('closeSubmitBtn').addEventListener('click', () => $('submitModal').hidden = true);
+  $('submitForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const file = $('subFile').files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('title', $('subTitle').value);
+    fd.append('playerId', store.get(KEY_ID));
+    
+    $('subSubmitBtn').disabled = true;
+    try {
+      const res = await fetch('/api/upload-player', { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error);
+      $('submitForm').reset();
+      $('submitModal').hidden = true;
+      alert('File uploaded successfully!');
+    } catch (err) {
+      alert(err.message || 'Upload failed');
+    }
+    $('subSubmitBtn').disabled = false;
+  });
+
   /* ---------- rendering ---------- */
   function render() {
     const s = state;
@@ -199,12 +259,22 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'opt';
-      b.append(makeEl('span', 'bubble', 'ABCDEF'[i]), makeEl('span', 'opt-text', text));
+      
+      const label = makeEl('span', 'opt-text', text);
+      const namesDiv = makeEl('div', 'opt-names', '');
+      namesDiv.style.fontSize = '0.8rem';
+      namesDiv.style.opacity = '0.8';
+      namesDiv.style.marginTop = '4px';
+      namesDiv.id = `optNames-${i}`;
+      
+      b.append(makeEl('span', 'bubble', 'ABCDEF'[i]), label, namesDiv);
       b.addEventListener('click', () => {
         if (b.disabled) return;
-        localChoice = i;          // show the tap immediately
+        localChoice = i;
         updateOptions(state);
-        socket.emit('player:answer', { choice: i });
+        if (!state.settings || !state.settings.submitMode) {
+          socket.emit('player:answer', { choice: i });
+        }
       });
       box.append(b);
     });
@@ -212,11 +282,18 @@
     localChoice = null;
   }
 
+  $('submitAnswerBtn').addEventListener('click', () => {
+    if (localChoice !== null) {
+      socket.emit('player:answer', { choice: localChoice });
+      localChoice = null; // Wait for server state
+    }
+  });
+
   function updateOptions(s) {
     const reveal = s.phase === 'reveal';
     const serverChoice = s.me && s.me.choice !== null ? s.me.choice : null;
     const choice = serverChoice !== null ? serverChoice : (reveal ? null : localChoice);
-    const locked = reveal || s.status === 'PAUSED' || choice !== null;
+    const locked = reveal || s.status === 'PAUSED' || serverChoice !== null;
 
     [...$('opts').children].forEach((b, i) => {
       b.disabled = locked;
@@ -228,6 +305,19 @@
         b.classList.add('picked');
       }
     });
+    
+    if (s.revealedChoices) {
+      s.revealedChoices.forEach((names, i) => {
+        const nd = $(`optNames-${i}`);
+        if (nd) nd.textContent = names.length > 0 ? names.join(', ') : '';
+      });
+    } else {
+      s.question.options.forEach((_, i) => {
+        const nd = $(`optNames-${i}`);
+        if (nd) nd.textContent = '';
+      });
+    }
+    
     return choice;
   }
 
@@ -262,7 +352,27 @@
     } else if (choice !== null) {
       result.textContent = 'Answer locked in. Waiting for the others.';
     } else {
-      result.textContent = s.status === 'PAUSED' ? '' : 'Tap your answer.';
+      result.textContent = s.status === 'PAUSED' && !s.descOpen ? '' : 'Tap your answer.';
+    }
+
+    if (s.settings && s.settings.submitMode) {
+      $('submitAnswerBtn').hidden = reveal || s.status === 'PAUSED' || (s.me && s.me.choice !== null);
+      $('submitAnswerBtn').disabled = localChoice === null;
+    } else {
+      $('submitAnswerBtn').hidden = true;
+    }
+
+    if (reveal && s.question.description) {
+      $('descBtn').hidden = false;
+    } else {
+      $('descBtn').hidden = true;
+    }
+
+    if (s.descOpen && s.question.description) {
+      $('descText').textContent = s.question.description;
+      $('descModal').hidden = false;
+    } else {
+      $('descModal').hidden = true;
     }
 
     renderBoard($('playBoard'), s.board, s.me ? s.me.pid : null);

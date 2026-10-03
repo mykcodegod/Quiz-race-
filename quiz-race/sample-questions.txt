@@ -4,6 +4,8 @@ B) Cellular respiration and ATP production
 C) DNA replication
 D) Lipid storage
 Answer: B
+Description: Mitochondria are membrane-bound cell organelles that generate most of the chemical energy needed to power the cell's biochemical reactions.
+
 
 Q2: Which data structure operates on a LIFO basis?
 A) Queue

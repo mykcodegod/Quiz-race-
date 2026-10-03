@@ -10,6 +10,7 @@ const QUESTION_START = /^\s*(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[:.)\-]\s*(\S.*)
 const OPTION = /^\s*\(?([A-Fa-f])\s*[).:]\s*(\S.*)$/;
 // "Answer: B", "Ans - c", "Correct Answer: (D)"
 const ANSWER = /^\s*(?:Correct\s+)?(?:Answer|Ans)\s*[:\-=]?\s*\(?([A-Fa-f])\b\)?/i;
+const DESCRIPTION = /^\s*Description\s*[:\-]?\s*(\S.*)$/i;
 
 // Page separators that PDF extraction inserts, e.g. "-- 1 of 3 --"
 const PAGE_MARKER = /^--\s*\d+\s+of\s+\d+\s*--$/;
@@ -46,6 +47,7 @@ function parseQuestions(raw) {
         text,
         options,
         correctIndex: cur.answer,
+        description: cur.description ? squash(cur.description) : null,
       });
     }
     cur = null;
@@ -68,7 +70,7 @@ function parseQuestions(raw) {
     const qm = t.match(QUESTION_START);
     if (qm) {
       finish();
-      cur = { number: Number(qm[1]), text: qm[2], options: [], answer: null, target: 'q' };
+      cur = { number: Number(qm[1]), text: qm[2], options: [], answer: null, description: null, target: 'q' };
       continue;
     }
 
@@ -83,7 +85,19 @@ function parseQuestions(raw) {
       continue;
     }
 
-    if (cur.answer !== null) continue; // explanations or footers after the answer
+    if (cur.answer !== null) {
+      const dm = t.match(DESCRIPTION);
+      if (dm) {
+        cur.description = (cur.description ? cur.description + ' ' : '') + dm[1];
+        cur.target = 'd';
+        continue;
+      }
+      if (cur.target === 'd') {
+        cur.description += ' ' + t;
+        continue;
+      }
+      continue; // explanations or footers after the answer
+    }
 
     if (cur.target === 'o') cur.options[cur.options.length - 1] += ' ' + t;
     else cur.text += ' ' + t;

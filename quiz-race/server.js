@@ -72,8 +72,9 @@ async function buildJoinCandidates() {
 
 const game = {
   status: 'LOBBY', // LOBBY | IN_PROGRESS | PAUSED | FINISHED
-  deck: null, // { fileName, questions, warnings }
-  settings: { timeLimitSec: 15, speedBonus: true },
+  decks: [], // Array of { id, title, uploader, fileName, questions, warnings, playedCount }
+  activeDeckId: null,
+  settings: { timeLimitSec: 15, speedBonus: true, autoMode: true, lastManPressure: false, pressureTimeSec: 10, submitMode: false },
   players: new Map(), // secret id -> player
   qIndex: -1,
   phase: null, // 'question' | 'reveal' | null
@@ -82,12 +83,22 @@ const game = {
   remainingMs: 0, // frozen value while paused
   counts: null,
   handle: null,
+  descOpen: false,
+  pausedForDesc: false,
+  pressureTriggered: false,
 };
 
 let nextPid = 1;
 let joinCandidates = [];
 
-const currentQuestion = () => (game.deck ? game.deck.questions[game.qIndex] : null);
+function getActiveDeck() {
+  return game.decks.find(d => d.id === game.activeDeckId) || null;
+}
+
+const currentQuestion = () => {
+  const d = getActiveDeck();
+  return d ? d.questions[game.qIndex] : null;
+};
 const connectedPlayers = () => [...game.players.values()].filter((p) => p.connected);
 
 function clearTimer() {
@@ -101,31 +112,46 @@ function startPhase(phase, ms) {
   clearTimer();
   game.phase = phase;
   game.phaseMs = ms;
-  game.endsAt = Date.now() + ms;
-  game.handle = setTimeout(onPhaseEnd, ms);
+  game.endsAt = ms > 0 ? Date.now() + ms : 0;
+  if (ms > 0) {
+    game.handle = setTimeout(onPhaseEnd, ms);
+  } else {
+    game.handle = null;
+  }
 }
 
 function remaining() {
   if (game.status === 'PAUSED') return game.remainingMs;
-  if (!game.phase) return 0;
+  if (!game.phase || game.phaseMs === 0) return 0;
   return Math.max(0, game.endsAt - Date.now());
 }
 
 function onPhaseEnd() {
   game.handle = null;
   if (game.status !== 'IN_PROGRESS') return;
-  if (game.phase === 'question') closeQuestion();
-  else if (game.phase === 'reveal') nextQuestion();
+  if (game.settings.autoMode) {
+    if (game.phase === 'question') closeQuestion();
+    else if (game.phase === 'reveal') nextQuestion();
+  }
 }
 
 function nextQuestion() {
   game.qIndex += 1;
+  const d = getActiveDeck();
+  if (d) d.playedCount = game.qIndex;
+  
   for (const p of game.players.values()) {
     p.answer = null;
     p.gain = 0;
   }
   game.counts = null;
-  if (game.qIndex >= game.deck.questions.length) return finishGame();
+  game.descOpen = false;
+  game.pausedForDesc = false;
+  game.pressureTriggered = false;
+  if (!d || game.qIndex >= d.questions.length) {
+    if (d) d.playedCount = d.questions.length;
+    return finishGame();
+  }
   startPhase('question', game.settings.timeLimitSec * 1000);
   broadcast();
 }
@@ -139,7 +165,12 @@ function closeQuestion() {
   for (const p of game.players.values()) {
     if (p.answer) {
       game.counts[p.answer.choice] += 1;
-      p.gain = p.answer.points;
+      // Calculate speed bonus if phaseMs > 0, else give flat points
+      if (game.settings.speedBonus && game.phaseMs > 0) {
+        p.gain = 500 + Math.round((500 * Math.max(0, game.endsAt - p.answer.time)) / game.phaseMs);
+      } else {
+        p.gain = 1000;
+      }
       p.score += p.gain;
     } else {
       p.gain = 0;
@@ -161,10 +192,26 @@ function checkAllAnswered() {
   if (game.status !== 'IN_PROGRESS' || game.phase !== 'question') return false;
   const active = connectedPlayers();
   if (active.length > 0 && active.every((p) => p.answer)) {
-    closeQuestion();
-    return true;
+    if (game.settings.autoMode) {
+      closeQuestion();
+      return true;
+    }
   }
   return false;
+}
+
+function triggerPressure() {
+  game.pressureTriggered = true;
+  const pressureMs = game.settings.pressureTimeSec * 1000;
+  
+  if (game.phaseMs === 0) {
+    startPhase('question', pressureMs);
+  } else {
+    const rem = remaining();
+    if (rem > pressureMs) {
+      startPhase('question', pressureMs);
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,21 +240,36 @@ function scoreboard() {
   });
 }
 
+function getRevealedChoices() {
+  const q = currentQuestion();
+  if (!q) return null;
+  const res = q.options.map(() => []);
+  for (const p of game.players.values()) {
+    if (p.answer) res[p.answer.choice].push(p.name);
+  }
+  return res;
+}
+
 function baseState() {
   const q = game.phase ? currentQuestion() : null;
   const reveal = game.phase === 'reveal' && q;
+  const d = getActiveDeck();
   return {
     status: game.status,
     phase: game.phase,
     remainingMs: remaining(),
     phaseMs: game.phaseMs,
     qNumber: game.qIndex + 1,
-    qTotal: game.deck ? game.deck.questions.length : 0,
-    question: q ? { text: q.text, options: q.options } : null,
+    qTotal: d ? d.questions.length : 0,
+    question: q ? { text: q.text, options: q.options, description: reveal ? q.description : null } : null,
     correctIndex: reveal ? q.correctIndex : null,
     counts: reveal ? game.counts : null,
+    revealedChoices: reveal ? getRevealedChoices() : null,
     board: scoreboard(),
     playerCount: connectedPlayers().length,
+    descOpen: game.descOpen,
+    pausedForDesc: game.pausedForDesc,
+    settings: game.settings,
   };
 }
 
@@ -233,17 +295,24 @@ function broadcast() {
   io.sockets.sockets.forEach((socket) => sendState(socket, base));
 }
 
-function deckPayload() {
-  if (!game.deck) return null;
+function decksPayload() {
   return {
-    fileName: game.deck.fileName,
-    count: game.deck.questions.length,
-    warnings: game.deck.warnings,
-    questions: game.deck.questions.map((q) => ({
-      text: q.text,
-      options: q.options,
-      correctIndex: q.correctIndex,
+    decks: game.decks.map((d) => ({
+      id: d.id,
+      title: d.title,
+      uploader: d.uploader,
+      fileName: d.fileName,
+      count: d.questions.length,
+      playedCount: d.playedCount,
+      warnings: d.warnings,
+      questions: d.questions.map((q) => ({
+        text: q.text,
+        options: q.options,
+        correctIndex: q.correctIndex,
+        description: q.description,
+      })),
     })),
+    activeDeckId: game.activeDeckId
   };
 }
 
@@ -305,11 +374,59 @@ app.post('/api/upload', localOnly, (req, res) => {
       if (questions.length === 0) {
         return res.status(422).json({ ok: false, error: 'No usable questions found in that file.', warnings });
       }
-      game.deck = { fileName, questions, warnings };
-      emitToHosts('deck', deckPayload());
+      const newDeck = {
+        id: crypto.randomUUID(),
+        title: fileName,
+        uploader: 'Host',
+        fileName,
+        questions,
+        warnings,
+        playedCount: 0
+      };
+      game.decks.push(newDeck);
+      game.activeDeckId = newDeck.id;
+      emitToHosts('decks', decksPayload());
       res.json({ ok: true });
     } catch (e) {
       res.status(422).json({ ok: false, error: e.message || 'Could not read that file.' });
+    }
+  });
+});
+
+app.post('/api/upload-player', (req, res) => {
+  upload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ ok: false, error: 'Upload failed.' });
+    if (game.status !== 'LOBBY') return res.status(409).json({ ok: false, error: 'Cannot upload now.' });
+    if (!req.file) return res.status(400).json({ ok: false, error: 'No file received.' });
+    
+    let fileName = req.file.originalname || 'questions';
+    if (/^[\x00-\xff]*$/.test(fileName)) fileName = Buffer.from(fileName, 'latin1').toString('utf8');
+    
+    const title = String(req.body.title || fileName).trim();
+    const pid = req.body.playerId;
+    const p = game.players.get(pid);
+    const uploader = p ? p.name : 'Player';
+
+    try {
+      const text = await extractText(req.file.buffer, fileName);
+      const { questions, warnings } = parseQuestions(text);
+      if (questions.length === 0) return res.status(422).json({ ok: false, error: 'No usable questions.' });
+      
+      const newDeck = {
+        id: crypto.randomUUID(),
+        title,
+        uploader,
+        fileName,
+        questions,
+        warnings,
+        playedCount: 0
+      };
+      game.decks.push(newDeck);
+      if (!game.activeDeckId) game.activeDeckId = newDeck.id;
+      emitToHosts('decks', decksPayload());
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(422).json({ ok: false, error: 'Could not read that file.' });
     }
   });
 });
@@ -324,7 +441,7 @@ io.on('connection', (socket) => {
     if (!isLocalAddr(socket.handshake.address)) return socket.emit('host:denied');
     socket.data.isHost = true;
     socket.emit('host:info', { candidates: joinCandidates });
-    socket.emit('deck', deckPayload());
+    socket.emit('decks', decksPayload());
     sendState(socket, baseState());
   });
 
@@ -332,32 +449,62 @@ io.on('connection', (socket) => {
     if (socket.data.isHost) fn(...args);
   };
 
+  socket.on('host:select_deck', hostOnly((id) => {
+    if (game.status !== 'LOBBY') return;
+    if (game.decks.some(d => d.id === id)) {
+      game.activeDeckId = id;
+      emitToHosts('decks', decksPayload());
+    }
+  }));
+
   socket.on(
     'host:start',
     hostOnly((opts = {}) => {
-      if (game.status !== 'LOBBY' || !game.deck || game.players.size === 0) return;
+      if (game.status !== 'LOBBY' || !getActiveDeck() || game.players.size === 0) return;
       const t = Math.round(Number(opts.timeLimitSec));
-      game.settings.timeLimitSec = Number.isFinite(t) ? Math.min(60, Math.max(5, t)) : 15;
+      game.settings.timeLimitSec = Number.isFinite(t) ? Math.max(0, t) : 15;
       game.settings.speedBonus = opts.speedBonus !== false;
+      game.settings.autoMode = opts.autoMode !== false;
+      game.settings.lastManPressure = !!opts.lastManPressure;
+      game.settings.pressureTimeSec = Number.isFinite(Number(opts.pressureTimeSec)) ? Math.max(1, Number(opts.pressureTimeSec)) : 10;
+      game.settings.submitMode = !!opts.submitMode;
+      
       for (const p of game.players.values()) {
         p.score = 0;
         p.answer = null;
         p.gain = 0;
       }
       game.status = 'IN_PROGRESS';
-      game.qIndex = -1;
+      
+      const d = getActiveDeck();
+      // Resume from where left off, or restart if completely played
+      game.qIndex = (d.playedCount >= d.questions.length) ? -1 : d.playedCount - 1;
       nextQuestion();
     })
   );
 
+  socket.on('host:next_phase', hostOnly(() => {
+    if (game.status !== 'IN_PROGRESS' && game.status !== 'PAUSED') return;
+    if (game.phase === 'question') {
+      closeQuestion();
+    } else if (game.phase === 'reveal') {
+      nextQuestion();
+    }
+  }));
+
   socket.on(
     'host:pause',
     hostOnly(() => {
-      if (game.status !== 'IN_PROGRESS') return;
-      game.remainingMs = remaining();
-      clearTimer();
-      game.status = 'PAUSED';
-      broadcast();
+      if (game.status === 'PAUSED' && game.pausedForDesc) {
+        game.pausedForDesc = false;
+        broadcast();
+      } else if (game.status === 'IN_PROGRESS') {
+        game.remainingMs = remaining();
+        clearTimer();
+        game.status = 'PAUSED';
+        game.pausedForDesc = false;
+        broadcast();
+      }
     })
   );
 
@@ -366,6 +513,8 @@ io.on('connection', (socket) => {
     hostOnly(() => {
       if (game.status !== 'PAUSED') return;
       game.status = 'IN_PROGRESS';
+      game.pausedForDesc = false;
+      game.descOpen = false;
       game.endsAt = Date.now() + game.remainingMs;
       game.handle = setTimeout(onPhaseEnd, game.remainingMs);
       broadcast();
@@ -442,14 +591,42 @@ io.on('connection', (socket) => {
     if (!Number.isInteger(choice) || choice < 0 || choice >= q.options.length) return;
 
     const correct = choice === q.correctIndex;
-    let points = 0;
-    if (correct) {
-      points = game.settings.speedBonus
-        ? 500 + Math.round((500 * remaining()) / game.phaseMs)
-        : 1000;
+    p.answer = { choice, correct, time: Date.now() };
+    
+    if (game.settings.lastManPressure && !game.pressureTriggered) {
+      const active = connectedPlayers();
+      const answered = active.filter(pl => pl.answer).length;
+      if (active.length > 0 && answered / active.length >= 0.8) {
+        triggerPressure();
+      }
     }
-    p.answer = { choice, correct, points };
+
     if (!checkAllAnswered()) broadcast();
+  });
+
+  socket.on('player:submit_question', () => { /* deprecated text submit */ });
+
+  socket.on('desc:toggle', (isOpen) => {
+    if (game.phase !== 'reveal') return;
+    
+    game.descOpen = !!isOpen;
+    
+    if (game.descOpen) {
+      if (game.status === 'IN_PROGRESS') {
+        game.remainingMs = remaining();
+        clearTimer();
+        game.status = 'PAUSED';
+        game.pausedForDesc = true;
+      }
+    } else {
+      if (game.status === 'PAUSED' && game.pausedForDesc) {
+        game.status = 'IN_PROGRESS';
+        game.pausedForDesc = false;
+        game.endsAt = Date.now() + game.remainingMs;
+        game.handle = setTimeout(onPhaseEnd, game.remainingMs);
+      }
+    }
+    broadcast();
   });
 
   socket.on('disconnect', () => {
